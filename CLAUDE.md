@@ -11,24 +11,24 @@ externalize_threshold: 5
 
 ## プロジェクト概要
 
-Slack チャンネル `#ps-times-fuma` のスレッド内容を AI で要約し、
+Slack チャンネルのスレッド内容を AI で要約し、
 X（Twitter）向けの高エンゲージメント投稿文を生成して Slack スレッドに返信するワークフロー。
 生成されたテキストはユーザーが確認後、手動で X にコピペ投稿する運用。
 
 ## アーキテクチャ
 
 ```
-[Trigger A: 🐦 リアクション] ──→ [n8n Webhook A]
+[Trigger A: 🐦 リアクション] ──→ [n8n Webhook]
                                          │
-[Trigger B: @x要約 メンション] ──→ [n8n Webhook B]
+[Trigger B: @bot メンション] ──→ [n8n Webhook]
                                          │
                                          ▼
-                              [Slack: conversations.replies]
+                              [HTTP Request: conversations.replies]
                               スレッド全メッセージ取得
                                          │
                                          ▼
                               [Code Node: format-thread.js]
-                              ユーザー名解決 + テキスト整形
+                              テキスト整形（user ID + メッセージ）
                                          │
                                          ▼
                               [Code Node: extract-mention-instruction.js]
@@ -36,19 +36,19 @@ X（Twitter）向けの高エンゲージメント投稿文を生成して Slack
                                          │
                                          ▼
                               [Code Node: build-ai-request.js]
-                              AI_MODEL_PROVIDER or model_override に応じた
-                              リクエスト構築
+                              model_override に応じたリクエスト構築
                                          │
                                          ▼
-                              [HTTP Request: AI API]
-                              機密フィルタ + X用要約生成
+                              [IF: プロバイダ判定]
+                              ├─ Anthropic → [HTTP Request: Anthropic API]
+                              └─ OpenAI   → [HTTP Request: OpenAI API]
                                          │
                                          ▼
                               [Code Node: parse-ai-response.js]
                               レスポンス正規化
                                          │
                                          ▼
-                              [Slack: chat.postMessage]
+                              [HTTP Request: chat.postMessage]
                               スレッドに要約を返信（使用モデル名を末尾に表示）
 ```
 
@@ -57,116 +57,84 @@ X（Twitter）向けの高エンゲージメント投稿文を生成して Slack
 ### A) リアクショントリガー
 
 - 絵文字: 🐦 (bird)
-- チャンネル: `#ps-times-fuma`
+- チャンネル: 対象の Slack チャンネル
 - Slack Event: `reaction_added`
 - スレッド親メッセージの `thread_ts` でスレッド全体を取得
-- デフォルトモデル（環境変数 `AI_MODEL_PROVIDER`）を使用
+- デフォルトモデル（フォールバック: `anthropic-opus`）を使用
 
 ### B) メンショントリガー
 
-- メンション: `@x要約` を含むメッセージ
+- メンション: Bot をメンションするメッセージ
 - Slack Event: `app_mention`
 - メンションテキストから **モデル指定** と **追加指示** を抽出
 
 #### メンション例
 
 ```
-@x要約 Xにして                      → デフォルト (Opus 4.6)
-@x要約 sonnetでXにして               → Sonnet に切替
-@x要約 haiku 短めに                  → Haiku + 短縮指示
-@x要約 gpt4oで英語にして              → GPT-4o + 英語指示
-@x要約 スカウトの話だけXにして          → デフォルト + トピック指定
+@bot Xにして                      → デフォルト (Opus 4.6)
+@bot sonnetでXにして               → Sonnet に切替
+@bot haiku 短めに                  → Haiku + 短縮指示
+@bot gpt4oで英語にして              → GPT-4o + 英語指示
+@bot スカウトの話だけXにして          → デフォルト + トピック指定
 ```
 
 #### モデルエイリアス（extract-mention-instruction.js で処理）
 
-| 入力キーワード      | 切替先                     |
-| ------------------- | -------------------------- |
-| `opus`              | anthropic-opus             |
-| `sonnet`            | anthropic-sonnet           |
-| `haiku`             | anthropic-haiku            |
-| `gpt4o`             | openai-gpt4o               |
-| `gpt4omini` / `gpt` | openai-gpt4o-mini          |
-| (指定なし)          | 環境変数 AI_MODEL_PROVIDER |
+| 入力キーワード      | 切替先                          |
+| ------------------- | ------------------------------- |
+| `opus`              | anthropic-opus                  |
+| `sonnet`            | anthropic-sonnet                |
+| `haiku`             | anthropic-haiku                 |
+| `gpt4o`             | openai-gpt4o                    |
+| `gpt4omini` / `gpt` | openai-gpt4o-mini               |
+| (指定なし)          | フォールバック (anthropic-opus) |
 
 ## AI モデル設定
 
-デフォルトは環境変数 `AI_MODEL_PROVIDER` で設定。
+デフォルトは `anthropic-opus`（フォールバック）。
 メンション時は動的に上書き可能。
 
-| Provider ID                   | モデル                     | エンドポイント                             | 認証ヘッダー                    | 月額概算(30回) |
-| ----------------------------- | -------------------------- | ------------------------------------------ | ------------------------------- | -------------- |
-| `anthropic-opus` (デフォルト) | claude-opus-4-6-20250515   | https://api.anthropic.com/v1/messages      | `x-api-key: $ANTHROPIC_API_KEY` | ~$0.83 (~¥125) |
-| `anthropic-sonnet`            | claude-sonnet-4-5-20250514 | 同上                                       | 同上                            | ~$0.50 (~¥75)  |
-| `anthropic-haiku`             | claude-haiku-4-5-20251001  | 同上                                       | 同上                            | ~$0.17 (~¥25)  |
-| `openai-gpt4o-mini`           | gpt-4o-mini                | https://api.openai.com/v1/chat/completions | `Bearer $OPENAI_API_KEY`        | ~$0.02 (~¥3)   |
-| `openai-gpt4o`                | gpt-4o                     | 同上                                       | 同上                            | ~$0.38 (~¥57)  |
+| Provider ID                   | モデル                     | エンドポイント                             |
+| ----------------------------- | -------------------------- | ------------------------------------------ |
+| `anthropic-opus` (デフォルト) | claude-opus-4-6            | https://api.anthropic.com/v1/messages      |
+| `anthropic-sonnet`            | claude-sonnet-4-5-20250929 | 同上                                       |
+| `anthropic-haiku`             | claude-haiku-4-5-20251001  | 同上                                       |
+| `openai-gpt4o-mini`           | gpt-4o-mini                | https://api.openai.com/v1/chat/completions |
+| `openai-gpt4o`                | gpt-4o                     | 同上                                       |
+
+認証は n8n の predefinedCredentialType（`anthropicApi`, `openAiApi`, `slackApi`）で管理。
 
 ## 環境変数
 
-### ローカル（n8n-cli 用）: ~/dev/slack-to-x-summary/.env
+### ローカル（n8n-cli 用）: .env
 
 ```bash
-export N8N_API_URL="https://n8n.srv1258652.hstgr.cloud/api/v1"
-export N8N_API_KEY="<n8nのAPIキー>"
+export N8N_API_URL="https://your-n8n-instance.example.com/api/v1"
+export N8N_API_KEY="<your-n8n-api-key>"
 ```
 
-### サーバー（n8n ランタイム用）: Hostinger Docker Manager → .yaml editor
+### サーバー（n8n ランタイム用）
 
-Hostinger 管理画面 → VPS → Docker Manager → n8n コンテナ → Manage → .yaml editor
-既存の `environment:` セクションに追記して Deploy（コンテナ再起動）。
+n8n サーバーの環境変数に以下を設定:
 
 ```yaml
 environment:
-  # --- 既存設定はそのまま残す ---
-  # --- ここから追加 ---
-  - ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxx
-  - OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
+  - ANTHROPIC_API_KEY=<your-anthropic-api-key>
+  - OPENAI_API_KEY=<your-openai-api-key>
   - AI_MODEL_PROVIDER=anthropic-opus
 ```
 
-ワークフロー内での参照:
-
-```javascript
-// Code Node 内
-const apiKey = $env.ANTHROPIC_API_KEY;
-const provider = $env.AI_MODEL_PROVIDER;
-```
-
-```
-// Expression 内（他ノードのフィールド）
-{{ $env.ANTHROPIC_API_KEY }}
-{{ $env.AI_MODEL_PROVIDER }}
-```
-
-動作確認（任意の Code Node で実行）:
-
-```javascript
-return {
-  provider: $env.AI_MODEL_PROVIDER,
-  key_exists: !!$env.ANTHROPIC_API_KEY,
-};
-// 期待結果: { provider: "anthropic-opus", key_exists: true }
-```
-
-注意: Deploy するとコンテナが再起動される（数秒間 n8n 停止）。業務時間外推奨。
+> **注意**: 現在のデプロイでは `$env` がブロックされているため、環境変数ではなく n8n Credentials と build-ai-request.js のフォールバック定数でモデルを管理しています。
 
 ## Slack App 設定
 
 ### 基本情報
 
-- App名: `x要約`
-- Bot Display Name: `x要約`
-- Default Username: `x-summary-bot`
+- App名: 任意（例: `x要約`）
+- Bot Display Name: 任意
 - 作成: https://api.slack.com/apps
 
-### 設定手順
-
-1. https://api.slack.com/apps → 「x要約」を選択
-2. 左メニュー → Features → **App Home**
-   - App Display Name の「Edit」→ Display Name: `x要約` / Default Username: `x-summary-bot` → Save
-3. 左メニュー → Features → **OAuth & Permissions**
-   - Bot Token Scopes に以下6つを追加:
+### 必要な Bot Token Scopes
 
 ```
 reactions:read
@@ -177,31 +145,30 @@ chat:write
 app_mentions:read
 ```
 
-4. 左メニュー → Settings → **Install App** → 「Install to Workspace」→ 許可
-5. 表示される **Bot User OAuth Token**（`xoxb-xxxx`）をコピー
-6. n8n の Credentials に「Slack API」として登録（Bot Token に `xoxb-xxxx` を入力）
-7. Slack で `#ps-times-fuma` チャンネルにて `/invite @x要約` で Bot を追加
-8. 左メニュー → Features → **Event Subscriptions**
-   - Enable Events: ON
-   - Request URL: n8n Webhook URL（デプロイ後に設定）
-   - Subscribe to bot events に追加:
+### Event Subscriptions
+
+Subscribe to bot events:
 
 ```
 reaction_added
 app_mention
 ```
 
-- Save Changes
+Request URL には n8n Webhook URL を設定。
 
-### ユーザートークンのスコープ
+### セットアップ手順
 
-不要。Bot Token Scopes のみで動作する。
+1. Slack App を作成し、上記の Bot Token Scopes を追加
+2. Workspace にインストールして Bot User OAuth Token を取得
+3. n8n の Credentials に Slack API として登録
+4. 対象チャンネルに Bot を招待（`/invite @botname`）
+5. Event Subscriptions で Webhook URL を設定
 
 ## AI プロンプト仕様
 
-### X アルゴリズム 2026 エンゲージメント重み（プロンプト設計の根拠）
+### X アルゴリズム エンゲージメント重み（プロンプト設計の根拠）
 
-出典: X open-sourced algorithm code, Sprout Social 2026/02/06, PostEverywhere 2026/02/02
+出典: X open-sourced algorithm code, Sprout Social, PostEverywhere
 
 | アクション                      | 重み  | いいねの何倍？ |
 | ------------------------------- | ----- | -------------- |
@@ -294,7 +261,7 @@ Slack スレッドの会話内容を、X でバズる投稿文に変換します
 
 ### メンション追加指示の処理
 
-ユーザーが `@x要約 短めに` 等の指示を付けた場合、
+ユーザーが `@bot 短めに` 等の指示を付けた場合、
 システムプロンプトに以下を追記:
 
 ```text
@@ -304,38 +271,45 @@ Slack スレッドの会話内容を、X でバズる投稿文に変換します
 
 ### メンションでのモデル指定の処理
 
-ユーザーが `@x要約 sonnetでXにして` 等のモデル指定をした場合、
+ユーザーがモデル名を含めてメンションした場合、
 extract-mention-instruction.js がモデルエイリアスを検出し、
 build-ai-request.js に `model_override` として渡す。
-環境変数 `AI_MODEL_PROVIDER` より優先される。
+フォールバックの `anthropic-opus` より優先される。
 
 ## ファイル構成
 
 ```
-~/dev/slack-to-x-summary/
-├── .env                          # n8n-cli 用環境変数（API URL, API KEY のみ）
+.
+├── .env                          # n8n-cli 用環境変数（API URL, API KEY）
 ├── CLAUDE.md                     # このファイル
-├── n8n-cli -> ~/dev/n8n-cli/n8n-cli  # シンボリックリンク
+├── n8n-cli                       # n8n-cli へのシンボリックリンク
 └── definitions/
     ├── slack-to-x-summary.yaml   # n8n ワークフロー定義
     └── slack-to-x-summary/       # 外部化された Code Node
+        ├── normalize-event.js    # イベント正規化
         ├── format-thread.js      # スレッド整形
+        ├── extract-mention-instruction.js  # メンション指示・モデル指定抽出
         ├── build-ai-request.js   # AIリクエスト構築
-        ├── parse-ai-response.js  # AIレスポンス解析
-        └── extract-mention-instruction.js  # メンション指示・モデル指定抽出
+        └── parse-ai-response.js  # AIレスポンス解析
 ```
 
 ## 各 Code Node の仕様
 
+### normalize-event.js
+
+- 入力: Slack Webhook イベント（`reaction_added` / `app_mention` / その他）
+- 処理: イベントタイプに応じて `channel`, `thread_ts`, `event_type` を正規化
+- 出力: `{ channel, thread_ts, event_type }` or null（対象外イベント）
+
 ### format-thread.js
 
-- 入力: Slack conversations.replies のレスポンス配列
+- 入力: Slack `conversations.replies` API のレスポンス
 - 処理:
-  1. 各メッセージの `user` ID を Slack `users.info` で表示名に解決
-  2. `[表示名] メッセージ本文` 形式に整形
-  3. Bot メッセージ（subtype: bot_message）を除外
-  4. Slack のマークアップ（`<@U123>`、`<#C123|name>` 等）をプレーンテキストに変換
-- 出力: 改行区切りの整形済みテキスト
+  1. `response.messages` 配列からメッセージを取得
+  2. Bot メッセージ（`subtype: bot_message` / `bot_id` 存在）を除外
+  3. Slack マークアップ（`<@U123>`、`<#C123|name>` 等）をプレーンテキストに変換
+  4. `[userId] メッセージ本文` 形式に整形
+- 出力: `{ formatted_thread: "改行区切りの整形済みテキスト" }`
 
 ### extract-mention-instruction.js
 
@@ -350,15 +324,16 @@ build-ai-request.js に `model_override` として渡す。
 
 ### build-ai-request.js
 
-- 入力: 整形済みテキスト + model_override（or null）+ 環境変数
+- 入力: 整形済みテキスト + model_override（or null）
 - 処理:
-  1. モデル決定の優先順位: `model_override` > `$env.AI_MODEL_PROVIDER` > `"anthropic-opus"`（フォールバック）
-  2. Provider ID に応じて API URL・ヘッダー・ボディ形式を構築
-  3. Anthropic の場合: Messages API 形式、ヘッダーに `x-api-key: $env.ANTHROPIC_API_KEY`
-  4. OpenAI の場合: Chat Completions 形式、ヘッダーに `Authorization: Bearer $env.OPENAI_API_KEY`
-  5. システムプロンプト（本ファイルの「システムプロンプト」セクション）とユーザーメッセージを設定
+  1. モデル決定の優先順位: `model_override` > フォールバック (`anthropic-opus`)
+  2. Provider ID に応じて API URL・ボディ形式を構築
+  3. Anthropic の場合: Messages API 形式
+  4. OpenAI の場合: Chat Completions 形式
+  5. システムプロンプトとユーザーメッセージを設定
   6. メンション追加指示がある場合はプロンプトに追記
-- 出力: `{ ai_url, ai_headers, ai_body, ai_provider_type, ai_model_name }` オブジェクト
+- 出力: `{ ai_url, ai_body, ai_provider_type, ai_model_name }`
+- 認証: n8n の predefinedCredentialType で管理（コード内では不要）
 
 ### parse-ai-response.js
 
@@ -385,28 +360,25 @@ build-ai-request.js に `model_override` として渡す。
 
 ⚠️ *除去した機密情報*: {removed_items をカンマ区切り}
 ───
-🤖 {ai_model_name} | 🐦で再生成 | @x要約 sonnet 等でモデル変更可
+🤖 {ai_model_name} | 🐦で再生成 | @bot sonnet 等でモデル変更可
 ```
 
 ## ワークフロー YAML 生成ルール
 
 - YAML フォーマット準拠
-- ノード名は日本語（例: 「設定値」「スレッド取得」「AI要約」「Slack返信」）
-- Slack 操作は n8n 組み込み Slack ノードを使用
+- ノード名は日本語（例: 「スレッド取得」「AIレスポンス解析」「Slack返信」）
+- Slack API 呼び出しは HTTP Request ノードを使用（n8n Slack ノードの制約回避のため）
+  - `conversations.replies`: スレッド取得
+  - `chat.postMessage`: スレッド返信（`thread_ts` を JSON body に含める）
 - AI API 呼び出しは HTTP Request ノードを使用
-  - URL: `{{ $json.ai_url }}`
-  - Headers: `{{ $json.ai_headers }}`（Code Node で構築済み）
-  - Body: `{{ $json.ai_body }}`
+  - Anthropic / OpenAI を IF ノードで分岐
 - モデル名をハードコードしない（Code Node で動的に構築）
-- API キーは `$env.ANTHROPIC_API_KEY` / `$env.OPENAI_API_KEY` で参照
-  - n8n の Credentials は使わない（Hostinger Docker 環境変数で管理）
-- credentials は Slack のみ名前参照（「Slack API」）
+- 認証は n8n の `predefinedCredentialType` で管理（`anthropicApi`, `openAiApi`, `slackApi`）
 
 ## デプロイ手順
 
 ```bash
 # 1. 環境変数読み込み
-cd ~/dev/slack-to-x-summary
 source .env
 
 # 2. Lint
@@ -431,7 +403,7 @@ source .env
 
 ### リアクションテスト
 
-1. `#ps-times-fuma` で複数人のやり取りがあるスレッドを選ぶ
+1. 対象チャンネルで複数人のやり取りがあるスレッドを選ぶ
 2. スレッド親メッセージに 🐦 リアクションを付ける
 3. 数秒後、スレッド内に要約が返信されることを確認
 4. 機密情報が除去されていることを確認
@@ -439,20 +411,20 @@ source .env
 
 ### メンションテスト
 
-1. 同スレッド内で `@x要約 Xにして` と投稿
+1. 同スレッド内で `@bot Xにして` と投稿
 2. 要約が返信されることを確認
-3. `@x要約 sonnetで短めにXにして` → Sonnet で短縮版が返ること
-4. `@x要約 haiku 英語で` → Haiku で英語の要約が返ること
+3. `@bot sonnetで短めにXにして` → Sonnet で短縮版が返ること
+4. `@bot haiku 英語で` → Haiku で英語の要約が返ること
 
 ### モデル切替テスト
 
-1. `@x要約 Xにして` → 末尾に `claude-opus-4.6` と表示
-2. `@x要約 sonnetでXにして` → 末尾に `claude-sonnet-4.5` と表示
-3. `@x要約 haikuでXにして` → 末尾に `claude-haiku-4.5` と表示
+1. `@bot Xにして` → 末尾に `claude-opus-4.6` と表示
+2. `@bot sonnetでXにして` → 末尾に `claude-sonnet-4.5` と表示
+3. `@bot haikuでXにして` → 末尾に `claude-haiku-4.5` と表示
 
 ## 投稿後のエンゲージメント最大化ガイド（運用Tips）
 
-出典: X open-sourced algorithm, PostEverywhere 2026/02/02, Sprout Social 2026/02/06
+出典: X open-sourced algorithm, PostEverywhere, Sprout Social
 
 1. **投稿後1時間以内にリプライ対応** — 著者返信 = いいねの150倍の重み（+75）
 2. **リプに来たらさらに返す** — 会話の深さがアルゴリズム最強シグナル
@@ -465,27 +437,20 @@ source .env
 
 ### よくある問題
 
-| 症状                           | 原因と対処                                                                         |
-| ------------------------------ | ---------------------------------------------------------------------------------- |
-| Webhook が反応しない           | Slack App の Event Subscriptions URL が正しいか確認                                |
-| スレッドが取得できない         | Bot（x要約）が `#ps-times-fuma` に参加しているか確認                               |
-| AI レスポンスが空              | Hostinger .yaml の ANTHROPIC_API_KEY と AI_MODEL_PROVIDER を確認                   |
-| `$env` が空 / access denied    | Hostinger Docker Manager で Deploy 済みか確認。YAML のインデント（スペース）を確認 |
-| 要約が機密情報を含む           | システムプロンプトの機密フィルタ部分を強化                                         |
-| JSON パースエラー              | parse-ai-response.js のフォールバック処理を確認                                    |
-| 「ボットユーザーがありません」 | Slack App → App Home で Display Name を設定                                        |
-| Bot Token が表示されない       | Slack App → Settings → Install App からインストール                                |
+| 症状                           | 原因と対処                                          |
+| ------------------------------ | --------------------------------------------------- |
+| Webhook が反応しない           | Slack App の Event Subscriptions URL が正しいか確認 |
+| スレッドが取得できない         | Bot が対象チャンネルに参加しているか確認            |
+| AI レスポンスが空              | n8n サーバーの環境変数（API キー）を確認            |
+| `$env` が空 / access denied    | n8n サーバーで環境変数がデプロイ済みか確認          |
+| 要約が機密情報を含む           | システムプロンプトの機密フィルタ部分を強化          |
+| JSON パースエラー              | parse-ai-response.js のフォールバック処理を確認     |
+| 「ボットユーザーがありません」 | Slack App → App Home で Display Name を設定         |
+| Bot Token が表示されない       | Slack App → Settings → Install App からインストール |
 
 ### ログ確認
 
 ```bash
 ./n8n-cli execution list --limit 10
 ./n8n-cli execution get <execution-id>
-```
-
-### 環境変数の確認（Hostinger SSH）
-
-```bash
-docker exec -it n8n printenv | grep ANTHROPIC
-docker exec -it n8n printenv | grep AI_MODEL
 ```
