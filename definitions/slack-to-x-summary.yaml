@@ -1,0 +1,328 @@
+name: "Slack→X要約Bot"
+meta:
+  instanceId: slack-to-x-summary
+tags:
+  - slack-x-summary
+nodes:
+  - id: webhook-slack
+    name: Slackイベント受信
+    type: n8n-nodes-base.webhook
+    typeVersion: 2
+    position: [0, 150]
+    parameters:
+      httpMethod: POST
+      path: slack-events
+      responseMode: responseNode
+      options: {}
+    webhookId: slack-events
+
+  - id: if-challenge
+    name: チャレンジ判定
+    type: n8n-nodes-base.if
+    typeVersion: 2
+    position: [200, 150]
+    parameters:
+      conditions:
+        options:
+          caseSensitive: true
+          leftValue: ""
+          typeValidation: strict
+        conditions:
+          - id: challenge-check
+            leftValue: "={{ $json.body.type }}"
+            rightValue: url_verification
+            operator:
+              type: string
+              operation: equals
+        combinator: and
+
+  - id: respond-challenge
+    name: チャレンジ応答
+    type: n8n-nodes-base.respondToWebhook
+    typeVersion: 1.1
+    position: [450, 0]
+    parameters:
+      respondWith: json
+      responseBody: "={{ JSON.stringify({ challenge: $('Slackイベント受信').item.json.body.challenge }) }}"
+      options: {}
+
+  - id: respond-ok
+    name: イベント応答
+    type: n8n-nodes-base.respondToWebhook
+    typeVersion: 1.1
+    position: [450, 300]
+    parameters:
+      respondWith: text
+      responseBody: ok
+      options:
+        responseCode: 200
+
+  - id: normalize-event
+    name: イベント正規化
+    type: n8n-nodes-base.code
+    typeVersion: 2
+    position: [650, 300]
+    parameters:
+      mode: runOnceForAllItems
+      jsCode: "{{$file:slack-to-x-summary/normalize-event.js}}"
+
+  - id: event-filter
+    name: イベントフィルタ
+    type: n8n-nodes-base.if
+    typeVersion: 2
+    position: [850, 300]
+    parameters:
+      conditions:
+        options:
+          caseSensitive: true
+          leftValue: ""
+          typeValidation: strict
+        conditions:
+          - id: has-channel
+            leftValue: "={{ $('イベント正規化').item.json.channel }}"
+            rightValue: ""
+            operator:
+              type: string
+              operation: notEmpty
+        combinator: and
+
+  - id: get-thread
+    name: スレッド取得
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 4.2
+    position: [1050, 300]
+    parameters:
+      method: GET
+      url: "https://slack.com/api/conversations.replies"
+      authentication: predefinedCredentialType
+      nodeCredentialType: slackApi
+      sendQuery: true
+      queryParameters:
+        parameters:
+          - name: channel
+            value: "={{ $('イベント正規化').item.json.channel }}"
+          - name: ts
+            value: "={{ $('イベント正規化').item.json.thread_ts }}"
+          - name: limit
+            value: "100"
+      options: {}
+    credentials:
+      slackApi:
+        id: 6LqksDSAXoPPQeYg
+        name: x-summary-bot
+
+  - id: format-thread
+    name: スレッド整形
+    type: n8n-nodes-base.code
+    typeVersion: 2
+    position: [1250, 300]
+    parameters:
+      mode: runOnceForAllItems
+      jsCode: "{{$file:slack-to-x-summary/format-thread.js}}"
+
+  - id: extract-mention
+    name: メンション指示抽出
+    type: n8n-nodes-base.code
+    typeVersion: 2
+    position: [1450, 300]
+    parameters:
+      mode: runOnceForAllItems
+      jsCode: "{{$file:slack-to-x-summary/extract-mention-instruction.js}}"
+
+  - id: build-ai-request
+    name: AIリクエスト構築
+    type: n8n-nodes-base.code
+    typeVersion: 2
+    position: [1650, 300]
+    parameters:
+      mode: runOnceForAllItems
+      jsCode: "{{$file:slack-to-x-summary/build-ai-request.js}}"
+
+  - id: provider-check
+    name: プロバイダ判定
+    type: n8n-nodes-base.if
+    typeVersion: 2
+    position: [1850, 300]
+    parameters:
+      conditions:
+        options:
+          caseSensitive: true
+          leftValue: ""
+          typeValidation: strict
+        conditions:
+          - id: is-anthropic
+            leftValue: "={{ $('AIリクエスト構築').item.json.ai_provider_type }}"
+            rightValue: anthropic
+            operator:
+              type: string
+              operation: equals
+        combinator: and
+
+  - id: ai-request-anthropic
+    name: Anthropic要約リクエスト
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 4.2
+    position: [2050, 200]
+    parameters:
+      method: POST
+      url: "={{ $('AIリクエスト構築').item.json.ai_url }}"
+      authentication: predefinedCredentialType
+      nodeCredentialType: anthropicApi
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: anthropic-version
+            value: "2023-06-01"
+          - name: content-type
+            value: application/json
+      sendBody: true
+      specifyBody: json
+      jsonBody: "={{ JSON.stringify($('AIリクエスト構築').item.json.ai_body) }}"
+      options:
+        timeout: 120000
+    credentials:
+      anthropicApi:
+        id: hzfjlfQHb53ig087
+        name: anthropic-summary
+
+  - id: ai-request-openai
+    name: OpenAI要約リクエスト
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 4.2
+    position: [2050, 400]
+    parameters:
+      method: POST
+      url: "={{ $('AIリクエスト構築').item.json.ai_url }}"
+      authentication: predefinedCredentialType
+      nodeCredentialType: openAiApi
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Content-Type
+            value: application/json
+      sendBody: true
+      specifyBody: json
+      jsonBody: "={{ JSON.stringify($('AIリクエスト構築').item.json.ai_body) }}"
+      options:
+        timeout: 120000
+    credentials:
+      openAiApi:
+        id: ZRB9j7TqFYDJmIfP
+        name: openai-summary
+
+  - id: parse-response
+    name: AIレスポンス解析
+    type: n8n-nodes-base.code
+    typeVersion: 2
+    position: [2250, 300]
+    parameters:
+      mode: runOnceForAllItems
+      jsCode: "{{$file:slack-to-x-summary/parse-ai-response.js}}"
+
+  - id: slack-reply
+    name: Slack返信
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 4.2
+    position: [2450, 300]
+    parameters:
+      method: POST
+      url: "https://slack.com/api/chat.postMessage"
+      authentication: predefinedCredentialType
+      nodeCredentialType: slackApi
+      sendBody: true
+      specifyBody: json
+      jsonBody: >-
+        ={{ JSON.stringify({
+        channel: $('イベント正規化').item.json.channel,
+        thread_ts: $('イベント正規化').item.json.thread_ts,
+        text: '📝 *X用要約（短縮版）*\n' +
+        $('AIレスポンス解析').item.json.x_post_short + '\n\n' +
+        '📝 *X用要約（標準版）*\n' +
+        $('AIレスポンス解析').item.json.x_post_standard + '\n\n' +
+        '📋 *フック*: ' + $('AIレスポンス解析').item.json.hook_type + '\n' +
+        '🎯 *戦略*: ' + $('AIレスポンス解析').item.json.engagement_strategy + '\n' +
+        '💡 *投稿Tips*: ' + $('AIレスポンス解析').item.json.post_tip + '\n\n' +
+        '⚠️ *除去した機密情報*: ' + (($('AIレスポンス解析').item.json.removed_items || []).join(', ') || 'なし') + '\n' +
+        '───\n' +
+        '🤖 ' + $('AIレスポンス解析').item.json.ai_model_name + ' | 🐦で再生成 | @x要約 sonnet 等でモデル変更可'
+        }) }}
+      options: {}
+    credentials:
+      slackApi:
+        id: 6LqksDSAXoPPQeYg
+        name: x-summary-bot
+
+connections:
+  Slackイベント受信:
+    main:
+      - - node: チャレンジ判定
+          type: main
+          index: 0
+  チャレンジ判定:
+    main:
+      - - node: チャレンジ応答
+          type: main
+          index: 0
+      - - node: イベント応答
+          type: main
+          index: 0
+  イベント応答:
+    main:
+      - - node: イベント正規化
+          type: main
+          index: 0
+  イベント正規化:
+    main:
+      - - node: イベントフィルタ
+          type: main
+          index: 0
+  イベントフィルタ:
+    main:
+      - - node: スレッド取得
+          type: main
+          index: 0
+  スレッド取得:
+    main:
+      - - node: スレッド整形
+          type: main
+          index: 0
+  スレッド整形:
+    main:
+      - - node: メンション指示抽出
+          type: main
+          index: 0
+  メンション指示抽出:
+    main:
+      - - node: AIリクエスト構築
+          type: main
+          index: 0
+  AIリクエスト構築:
+    main:
+      - - node: プロバイダ判定
+          type: main
+          index: 0
+  プロバイダ判定:
+    main:
+      - - node: Anthropic要約リクエスト
+          type: main
+          index: 0
+      - - node: OpenAI要約リクエスト
+          type: main
+          index: 0
+  Anthropic要約リクエスト:
+    main:
+      - - node: AIレスポンス解析
+          type: main
+          index: 0
+  OpenAI要約リクエスト:
+    main:
+      - - node: AIレスポンス解析
+          type: main
+          index: 0
+  AIレスポンス解析:
+    main:
+      - - node: Slack返信
+          type: main
+          index: 0
+settings:
+  executionOrder: v1

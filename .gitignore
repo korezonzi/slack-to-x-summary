@@ -1,0 +1,4 @@
+.env
+n8n-cli
+node_modules/
+reference/
