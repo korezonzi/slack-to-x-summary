@@ -9,7 +9,7 @@ let channel = null;
 let threadTs = null;
 let text = null;
 
-if (eventType === "reaction_added") {
+if (eventType === "reaction_added" && event.reaction === "bird") {
   channel = event.item?.channel;
   threadTs = event.item?.ts;
 } else if (eventType === "app_mention") {
