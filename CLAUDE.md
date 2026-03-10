@@ -375,28 +375,91 @@ build-ai-request.js に `model_override` として渡す。
 - モデル名をハードコードしない（Code Node で動的に構築）
 - 認証は n8n の `predefinedCredentialType` で管理（`anthropicApi`, `openAiApi`, `slackApi`）
 
+## 本番ワークフロー情報
+
+| 項目           | 値                 |
+| -------------- | ------------------ |
+| ワークフローID | `g2do0vq62tGgIown` |
+| 名前           | Slack→X要約Bot     |
+| 状態           | Active             |
+| Webhook パス   | `slack-events`     |
+
+> **注意**: `definitions/slack-to-x-summary.yaml` の `id: "1LBtEbOeefaECCXo"` は別の非アクティブなワークフロー。
+> `n8n-cli apply` でデプロイすると新規ワークフローが増殖するため、Code Node の更新は必ず REST API 直接呼び出しで行う。
+
 ## デプロイ手順
 
+### Code Node を更新する場合（通常の手順）
+
+`n8n-cli apply` は HTTP 400 エラー ("request/body must NOT have additional properties") で動作しないため、n8n REST API を直接呼び出す。
+
 ```bash
-# 1. 環境変数読み込み
 source .env
 
-# 2. Lint
+python3 << 'EOF'
+import json, ssl, urllib.request, os
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+api_url = os.environ['N8N_API_URL']
+api_key = os.environ['N8N_API_KEY']
+workflow_id = 'g2do0vq62tGgIown'  # 本番ワークフローID
+
+# ワークフロー取得
+req = urllib.request.Request(
+    f"{api_url}/workflows/{workflow_id}",
+    headers={"X-N8N-API-KEY": api_key}
+)
+with urllib.request.urlopen(req, context=ctx) as resp:
+    workflow = json.loads(resp.read())
+
+# 更新したい Code Node の jsCode を書き換える
+# 例: normalize-event の更新
+with open('definitions/slack-to-x-summary/normalize-event.js', 'r') as f:
+    js_code = f.read()
+for node in workflow['nodes']:
+    if node['id'] == 'normalize-event':
+        node['parameters']['jsCode'] = js_code
+        break
+
+# PUT（許可フィールドのみ: name/nodes/connections/settings）
+payload = {
+    'name': workflow['name'],
+    'nodes': workflow['nodes'],
+    'connections': workflow['connections'],
+    'settings': workflow.get('settings', {}),
+}
+body = json.dumps(payload).encode('utf-8')
+req = urllib.request.Request(
+    f"{api_url}/workflows/{workflow_id}",
+    data=body,
+    headers={"X-N8N-API-KEY": api_key, "Content-Type": "application/json"},
+    method="PUT"
+)
+with urllib.request.urlopen(req, context=ctx) as resp:
+    result = json.loads(resp.read())
+    print(f"Updated: {result['name']} (updatedAt: {result['updatedAt']})")
+EOF
+```
+
+> **n8n REST API の PUT 制約**: `name`, `nodes`, `connections`, `settings` の 4 フィールドのみ受け付ける。
+> `id`, `active`, `createdAt`, `updatedAt` 等を含めると 400 エラーになる。
+
+### Lint と差分確認（参考用）
+
+```bash
+source .env
 ./n8n-cli lint -d ./definitions
+./n8n-cli apply --dry-run --yaml -d ./definitions  # 差分確認のみ（applyは動作しない）
+```
 
-# 3. Dry-run（差分確認）
-./n8n-cli apply --dry-run --yaml -d ./definitions
+### ワークフローの有効化確認
 
-# 4. デプロイ
-./n8n-cli apply --yaml -d ./definitions
-
-# 5. ワークフロー確認
-./n8n-cli workflow list --tags slack-x-summary
-
-# 6. 有効化
-./n8n-cli workflow activate <workflow-id>
-
-# 7. Webhook URL を取得し、Slack App の Event Subscriptions Request URL に設定
+```bash
+source .env
+./n8n-cli workflow list 2>&1 | grep "Slack→X要約Bot"
 ```
 
 ## テスト方法
@@ -437,16 +500,20 @@ source .env
 
 ### よくある問題
 
-| 症状                           | 原因と対処                                          |
-| ------------------------------ | --------------------------------------------------- |
-| Webhook が反応しない           | Slack App の Event Subscriptions URL が正しいか確認 |
-| スレッドが取得できない         | Bot が対象チャンネルに参加しているか確認            |
-| AI レスポンスが空              | n8n サーバーの環境変数（API キー）を確認            |
-| `$env` が空 / access denied    | n8n サーバーで環境変数がデプロイ済みか確認          |
-| 要約が機密情報を含む           | システムプロンプトの機密フィルタ部分を強化          |
-| JSON パースエラー              | parse-ai-response.js のフォールバック処理を確認     |
-| 「ボットユーザーがありません」 | Slack App → App Home で Display Name を設定         |
-| Bot Token が表示されない       | Slack App → Settings → Install App からインストール |
+| 症状                                                                 | 原因と対処                                                                         |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Webhook が反応しない                                                 | Slack App の Event Subscriptions URL が正しいか確認                                |
+| スレッドが取得できない                                               | Bot が対象チャンネルに参加しているか確認                                           |
+| AI レスポンスが空                                                    | n8n サーバーの環境変数（API キー）を確認                                           |
+| `$env` が空 / access denied                                          | n8n サーバーで環境変数がデプロイ済みか確認                                         |
+| 要約が機密情報を含む                                                 | システムプロンプトの機密フィルタ部分を強化                                         |
+| JSON パースエラー                                                    | parse-ai-response.js のフォールバック処理を確認                                    |
+| 「ボットユーザーがありません」                                       | Slack App → App Home で Display Name を設定                                        |
+| Bot Token が表示されない                                             | Slack App → Settings → Install App からインストール                                |
+| `n8n-cli apply` が HTTP 400 で失敗する                               | `n8n-cli apply` は動作しない。デプロイ手順の REST API 直接呼び出しを使うこと       |
+| `n8n-cli apply` で "request/body must have required property 'name'" | n8n API の PUT 制約。許可フィールド（name/nodes/connections/settings）のみ送信する |
+| どのスタンプでもボットが起動する                                     | normalize-event.js の bird フィルタが本番に未反映。REST API で直接デプロイすること |
+| `workflow list --tags slack-x-summary` が空を返す                    | 本番ワークフロー `g2do0vq62tGgIown` にタグが付いていない。`workflow list` で確認   |
 
 ### ログ確認
 
